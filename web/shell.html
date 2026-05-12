@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+    <meta name="theme-color" content="#050814">
+    <link rel="icon" href="data:,">
+    <title>TRAD Strike</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #050814;
+        color: #d6e8ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overscroll-behavior: none;
+        touch-action: none;
+      }
+
+      #canvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+        outline: none;
+        background: #050814;
+      }
+
+      #status {
+        position: fixed;
+        left: 16px;
+        bottom: 16px;
+        max-width: min(520px, calc(100vw - 32px));
+        color: rgba(214, 232, 255, 0.72);
+        font-size: 13px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="status"></div>
+    <script>
+      const statusElement = document.getElementById("status");
+      var Module = {
+        canvas: document.getElementById("canvas"),
+        print(text) {
+          console.log(text);
+        },
+        printErr(text) {
+          console.error(text);
+          statusElement.textContent = text;
+        },
+        setStatus(text) {
+          statusElement.textContent = text || "";
+        },
+        totalDependencies: 0,
+        monitorRunDependencies(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          if (left) {
+            this.setStatus(`Loading ${this.totalDependencies - left}/${this.totalDependencies}`);
+          } else {
+            this.setStatus("");
+          }
+        }
+      };
+      window.onerror = (message) => {
+        statusElement.textContent = message;
+      };
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>
