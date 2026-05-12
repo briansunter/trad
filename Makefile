@@ -1,7 +1,7 @@
 PROJECT := trad
 BUILD_DIR := build
 WEB_DIR := dist
-CECS_DIR ?= ../c-ecs
+CECS_DIR ?= vendor/c-ecs
 SOKOL_DIR := vendor/sokol
 ASSET_OBJ_DIR := assets/vendor/kenney-space-kit/Models/OBJ format
 
