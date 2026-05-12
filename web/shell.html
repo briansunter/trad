@@ -3,6 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <meta name="theme-color" content="#050814">
     <link rel="icon" href="data:,">
     <title>TRAD Strike</title>
@@ -46,6 +49,10 @@
       const statusElement = document.getElementById("status");
       var Module = {
         canvas: document.getElementById("canvas"),
+        locateFile(path, prefix) {
+          if (path.endsWith(".wasm")) return `${prefix}${path}?v=controls11`;
+          return `${prefix}${path}`;
+        },
         print(text) {
           console.log(text);
         },
