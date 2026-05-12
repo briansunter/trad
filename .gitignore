@@ -4,3 +4,6 @@ artifacts/
 downloads/
 result
 .DS_Store
+*.gcov
+*.gcno
+*.gcda
