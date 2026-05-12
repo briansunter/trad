@@ -32,8 +32,8 @@
 #define WORLD_W 18.0f
 #define WORLD_H 30.0f
 #define PLAYER_Z 2.2f
-#define PLAYER_MIN_Z 0.0f
-#define PLAYER_MAX_Z 15.0f
+#define PLAYER_MIN_Z -2.0f
+#define PLAYER_MAX_Z 32.0f
 #define STAR_COUNT 180
 
 typedef struct Position { float x, z; } Position;
@@ -103,29 +103,11 @@ enum {
 };
 
 typedef struct InputState {
-    bool keys[512];
-    bool mouse_down;
-    float mouse_x;
-    float mouse_y;
-    bool touch_move_down;
-    uintptr_t touch_move_id;
-    float touch_move_origin_x;
-    float touch_move_origin_y;
-    float touch_move_x;
-    float touch_move_y;
-    bool touch_left;
-    bool touch_right;
-    bool touch_up;
-    bool touch_down;
-    bool touch_fire_down;
-    uintptr_t touch_fire_id;
-    float touch_fire_origin_x;
-    float touch_fire_origin_y;
-    float touch_fire_x;
-    float touch_fire_y;
-    bool touch_b_down;
-    uintptr_t touch_b_id;
-    float touch_overlay_timer;
+    bool drag_down;
+    bool drag_is_touch;
+    uintptr_t drag_touch_id;
+    float drag_x;
+    float drag_y;
     bool fire_pressed;
 } InputState;
 
@@ -187,22 +169,18 @@ static float dist2(float ax, float az, float bx, float bz) {
     return dx * dx + dz * dz;
 }
 
-static bool touch_controls_visible(void) {
+static float bottom_hud_h(void) {
+    float h = sapp_heightf();
     float w = sapp_widthf();
-    float h = sapp_heightf();
-    return (w < h * 1.18f) || g.input.touch_overlay_timer > 0.0f ||
-           g.input.touch_move_down || g.input.touch_fire_down || g.input.touch_b_down;
-}
-
-static float control_reserve_h(void) {
-    if (!touch_controls_visible()) return 0.0f;
-    float h = sapp_heightf();
-    return clampf(h * 0.31f, 260.0f, 560.0f);
+    return (w < h * 1.18f) ? clampf(h * 0.17f, 118.0f, 168.0f)
+                            : clampf(h * 0.10f, 72.0f, 110.0f);
 }
 
 static float gameplay_view_h(void) {
-    float h = sapp_heightf() - control_reserve_h();
-    return h < 240.0f ? 240.0f : h;
+    float h = sapp_heightf();
+    if (h <= 240.0f) return h;
+    float view_h = h - bottom_hud_h();
+    return view_h < 240.0f ? 240.0f : view_h;
 }
 
 static float world_half_x(void) {
@@ -210,6 +188,12 @@ static float world_half_x(void) {
     float half_x = (WORLD_H + 1.5f) * aspect * 0.5f;
     float min_half = WORLD_W * 0.58f;
     return half_x < min_half ? min_half : half_x;
+}
+
+static float player_muzzle_forward_world(float shot_scale) {
+    float mesh_radius = trad_meshes[TRAD_MESH_CRAFT_RACER].radius * 1.45f;
+    float projectile_tail = shot_scale * 1.15f;
+    return mesh_radius + projectile_tail + 0.2f;
 }
 
 static void add_component_types(cecs_world *world) {
@@ -297,14 +281,14 @@ static void spawn_player(void) {
     (void)CECS_ADD(&g.world, g.player, PlayerTag, NULL);
 }
 
-static void spawn_player_shot(float x, float z, float heading, float speed, float scale, int damage, uint8_t r, uint8_t gg, uint8_t b) {
+static void spawn_player_shot(float x, float z, float vx, float vz, float scale, int damage, uint8_t r, uint8_t gg, uint8_t b) {
     cecs_entity e = cecs_spawn(&g.world);
     Position p = { x, z };
-    Velocity v = { tanf(heading) * speed, speed };
+    Velocity v = { vx, vz };
     Collider c = { 0.13f + scale * 0.12f };
     Lifetime lt = { 1.8f };
     Damage dmg = { damage };
-    Renderable rr = { 0, RK_PLAYER_SHOT, scale, heading, r, gg, b, 255, 0.0f };
+    Renderable rr = { 0, RK_PLAYER_SHOT, scale, atan2f(vx, vz), r, gg, b, 255, 0.0f };
     (void)CECS_ADD(&g.world, e, Position, &p);
     (void)CECS_ADD(&g.world, e, Velocity, &v);
     (void)CECS_ADD(&g.world, e, Collider, &c);
@@ -315,15 +299,18 @@ static void spawn_player_shot(float x, float z, float heading, float speed, floa
 }
 
 static void spawn_player_shot_aligned(const Position *origin, float ship_heading, float side, float forward,
-                                      float shot_heading, float speed, float scale, int damage,
+                                      float ship_vx, float ship_vz, float spread_heading, float speed, float scale, int damage,
                                       uint8_t r, uint8_t gg, uint8_t b) {
     float sx = cosf(ship_heading);
     float sz = -sinf(ship_heading);
     float fx = sinf(ship_heading);
     float fz = cosf(ship_heading);
+    float vx = ship_vx + sinf(spread_heading) * speed;
+    float shot_vz = cosf(spread_heading) * speed;
+    float vz = fmaxf(ship_vz + shot_vz, shot_vz * 0.72f);
     spawn_player_shot(origin->x + sx * side + fx * forward,
                       origin->z + sz * side + fz * forward,
-                      shot_heading, speed, scale, damage, r, gg, b);
+                      vx, vz, scale, damage, r, gg, b);
 }
 
 static void spawn_enemy_shot_dir(float x, float z, float dx, float dz, float speed, float scale) {
@@ -448,135 +435,62 @@ static void reset_game(void) {
     spawn_player();
 }
 
-typedef struct TouchLayout {
-    float pad_r;
-    float left_x;
-    float left_y;
-    float a_x;
-    float a_y;
-    float b_x;
-    float b_y;
-    float button_r;
-} TouchLayout;
-
-static TouchLayout touch_layout(void) {
+static void drag_target_world(float *out_x, float *out_z) {
     float w = sapp_widthf();
-    float h = sapp_heightf();
-    float min_side = w < h ? w : h;
-    float pad_r = clampf(min_side * 0.148f, 56.0f, 96.0f);
-    float margin_x = clampf(w * 0.085f, 28.0f, 74.0f);
-    float margin_y = clampf(h * 0.23f, 170.0f, 330.0f);
-    float button_r = clampf(pad_r * 0.52f, 32.0f, 50.0f);
-    float a_x = w - margin_x - button_r * 1.75f;
-    float a_y = h - margin_y - button_r * 1.35f;
-    float b_x = a_x - button_r * 2.2f;
-    float b_y = a_y;
-    TouchLayout layout = {
-        pad_r,
-        margin_x + pad_r,
-        h - margin_y - pad_r * 0.95f,
-        a_x,
-        a_y,
-        b_x,
-        b_y,
-        button_r
-    };
-    return layout;
-}
-
-static void clear_touch_dpad(void) {
-    g.input.touch_left = false;
-    g.input.touch_right = false;
-    g.input.touch_up = false;
-    g.input.touch_down = false;
-}
-
-static void set_touch_dpad(float x, float y) {
-    TouchLayout layout = touch_layout();
-    float dx = x - layout.left_x;
-    float dy = y - layout.left_y;
-    float dead = layout.pad_r * 0.22f;
-    clear_touch_dpad();
-    if (dx < -dead) g.input.touch_left = true;
-    if (dx > dead) g.input.touch_right = true;
-    if (dy < -dead) g.input.touch_up = true;
-    if (dy > dead) g.input.touch_down = true;
-}
-
-static bool point_in_circle2(float x, float y, float cx, float cy, float r) {
-    float dx = x - cx;
-    float dy = y - cy;
-    return dx * dx + dy * dy <= r * r;
-}
-
-static void collect_input(float *out_x, float *out_z, bool *out_fire) {
-    float ix = 0.0f;
-    float iz = 0.0f;
-    if (g.input.keys[SAPP_KEYCODE_A] || g.input.keys[SAPP_KEYCODE_LEFT]) ix += 1.0f;
-    if (g.input.keys[SAPP_KEYCODE_D] || g.input.keys[SAPP_KEYCODE_RIGHT]) ix -= 1.0f;
-    if (g.input.keys[SAPP_KEYCODE_W] || g.input.keys[SAPP_KEYCODE_UP]) iz += 1.0f;
-    if (g.input.keys[SAPP_KEYCODE_S] || g.input.keys[SAPP_KEYCODE_DOWN]) iz -= 1.0f;
-    if (g.input.touch_move_down) {
-        if (g.input.touch_left) ix += 1.0f;
-        if (g.input.touch_right) ix -= 1.0f;
-        if (g.input.touch_up) iz += 1.0f;
-        if (g.input.touch_down) iz -= 1.0f;
-    }
-    if (g.input.mouse_down) {
-        Position *p = CECS_GET(&g.world, g.player, Position);
-        if (p) {
-            float w = sapp_widthf();
-            float h = gameplay_view_h();
-            float view_w = world_half_x() * 2.0f;
-            float tx = (0.5f - g.input.mouse_x / w) * view_w;
-            float tz = (1.0f - g.input.mouse_y / h) * (WORLD_H + 1.5f) - 0.75f;
-            ix += clampf((tx - p->x) * 0.38f, -1.0f, 1.0f);
-            iz += clampf((tz - p->z) * 0.38f, -1.0f, 1.0f);
-        }
-    }
-    float mag = sqrtf(ix * ix + iz * iz);
-    if (mag > 1.0f) {
-        ix /= mag;
-        iz /= mag;
-    }
-    *out_x = ix;
-    *out_z = iz;
-    *out_fire = g.input.keys[SAPP_KEYCODE_SPACE] || g.input.keys[SAPP_KEYCODE_Z] ||
-                g.input.keys[SAPP_KEYCODE_X] || g.input.keys[SAPP_KEYCODE_ENTER] ||
-                g.input.mouse_down || g.input.touch_fire_down;
+    float h = gameplay_view_h();
+    if (w < 1.0f) w = 1.0f;
+    if (h < 1.0f) h = 1.0f;
+    float half_x = world_half_x();
+    float ship_offset = clampf(sapp_heightf() * 0.06f, 60.0f, 160.0f);
+    float sx = clampf(g.input.drag_x, 0.0f, w);
+    float sy = clampf(g.input.drag_y - ship_offset, 0.0f, h);
+    *out_x = clampf(half_x - (sx / w) * half_x * 2.0f, -half_x + 0.5f, half_x - 0.5f);
+    *out_z = clampf((WORLD_H + 1.25f) - (sy / h) * (WORLD_H + 2.5f), PLAYER_MIN_Z, PLAYER_MAX_Z);
 }
 
 static void player_system(cecs_world *world, void *ctx) {
     (void)ctx;
-    float ix, iz;
-    bool fire;
-    collect_input(&ix, &iz, &fire);
     if (!cecs_is_alive(world, g.player)) return;
     Position *p = CECS_GET(world, g.player, Position);
     Renderable *r = CECS_GET(world, g.player, Renderable);
     if (!p || !r) return;
-    bool focus = g.input.touch_b_down || g.input.keys[SAPP_KEYCODE_LEFT_SHIFT] || g.input.keys[SAPP_KEYCODE_RIGHT_SHIFT];
-    float control_scale = focus ? 0.56f : 1.0f;
-    p->x = clampf(p->x + ix * 10.8f * control_scale * g.dt, -8.1f, 8.1f);
-    p->z = clampf(p->z + iz * 9.6f * control_scale * g.dt, PLAYER_MIN_Z, PLAYER_MAX_Z);
-    r->yaw = clampf(atan2f(ix * 10.8f * control_scale, 21.0f), -0.52f, 0.52f);
+    float move_x = 0.0f;
+    float move_z = 0.0f;
+    if (g.input.drag_down) {
+        float tx;
+        float tz;
+        drag_target_world(&tx, &tz);
+        float dx = tx - p->x;
+        float dz = tz - p->z;
+        move_x = dx;
+        move_z = dz;
+        p->x = tx;
+        p->z = tz;
+    }
+    float ship_vx = move_x / (g.dt > 0.001f ? g.dt : 0.001f);
+    float ship_vz = move_z / (g.dt > 0.001f ? g.dt : 0.001f);
+    r->yaw = clampf(atan2f(ship_vx, 21.0f), -0.52f, 0.52f);
     if (g.shot_timer > 0.0f) g.shot_timer -= g.dt;
-    if (fire && g.shot_timer <= 0.0f) {
+    if (g.input.drag_down && g.shot_timer <= 0.0f) {
         float heading = r->yaw;
         int level = g.weapon_level;
         if (level < 1) level = 1;
         if (level > 4) level = 4;
-        spawn_player_shot_aligned(p, heading, -0.44f, 0.92f, heading, 21.0f, 0.34f, 1, 82, 220, 255);
-        spawn_player_shot_aligned(p, heading, 0.44f, 0.92f, heading, 21.0f, 0.34f, 1, 82, 220, 255);
+        float muzzle_34 = player_muzzle_forward_world(0.34f);
+        float muzzle_42 = player_muzzle_forward_world(0.42f);
+        float muzzle_29 = player_muzzle_forward_world(0.29f);
+        float muzzle_52 = player_muzzle_forward_world(0.52f);
+        spawn_player_shot_aligned(p, heading, -0.42f, muzzle_34, ship_vx, ship_vz, 0.0f, 34.0f, 0.34f, 1, 82, 220, 255);
+        spawn_player_shot_aligned(p, heading, 0.42f, muzzle_34, ship_vx, ship_vz, 0.0f, 34.0f, 0.34f, 1, 82, 220, 255);
         if (level >= 2) {
-            spawn_player_shot_aligned(p, heading, 0.0f, 1.16f, heading, 22.5f, 0.42f, 2, 135, 246, 255);
+            spawn_player_shot_aligned(p, heading, 0.0f, muzzle_42, ship_vx, ship_vz, 0.0f, 37.0f, 0.42f, 2, 135, 246, 255);
         }
         if (level >= 3) {
-            spawn_player_shot_aligned(p, heading, -0.72f, 0.54f, heading - 0.12f, 20.2f, 0.29f, 1, 122, 255, 190);
-            spawn_player_shot_aligned(p, heading, 0.72f, 0.54f, heading + 0.12f, 20.2f, 0.29f, 1, 122, 255, 190);
+            spawn_player_shot_aligned(p, heading, -0.70f, muzzle_29, ship_vx, ship_vz, -0.12f, 32.0f, 0.29f, 1, 122, 255, 190);
+            spawn_player_shot_aligned(p, heading, 0.70f, muzzle_29, ship_vx, ship_vz, 0.12f, 32.0f, 0.29f, 1, 122, 255, 190);
         }
         if (level >= 4) {
-            spawn_player_shot_aligned(p, heading, 0.0f, 1.34f, heading, 24.0f, 0.52f, 3, 255, 228, 132);
+            spawn_player_shot_aligned(p, heading, 0.0f, muzzle_52, ship_vx, ship_vz, 0.0f, 40.0f, 0.52f, 3, 255, 228, 132);
         }
         g.shot_timer = 0.12f - (float)(level - 1) * 0.014f;
     }
@@ -925,7 +839,7 @@ static void draw_world(void) {
     sgl_ortho(-half_x, half_x, -1.25f, WORLD_H + 1.25f, -64.0f, 64.0f);
     sgl_matrix_mode_modelview();
     sgl_load_identity();
-    sgl_lookat(shake_x, 32.0f, 15.0f + shake_z, shake_x * 0.2f, 0.0f, 15.0f, 0.0f, 0.0f, 1.0f);
+    sgl_lookat(shake_x, 32.0f, shake_z, shake_x * 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
 
     sgl_load_pipeline(g.alpha_pip);
     draw_quad3(-half_x - 2.0f, -4.0f, half_x + 2.0f, WORLD_H + 6.0f, -0.08f, 4, 7, 18, 255);
@@ -1044,128 +958,6 @@ static void draw_ring2(float cx, float cy, float radius, uint8_t r, uint8_t gg, 
     sgl_end();
 }
 
-static void draw_line2(float x0, float y0, float x1, float y1, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    sgl_begin_lines();
-    sgl_v2f_c4b(x0, y0, r, gg, b, a);
-    sgl_v2f_c4b(x1, y1, r, gg, b, a);
-    sgl_end();
-}
-
-static void draw_tri2(float x0, float y0, float x1, float y1, float x2, float y2, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    sgl_begin_triangles();
-    sgl_v2f_c4b(x0, y0, r, gg, b, a);
-    sgl_v2f_c4b(x1, y1, r, gg, b, a);
-    sgl_v2f_c4b(x2, y2, r, gg, b, a);
-    sgl_end();
-}
-
-static void local_to_screen2(float cx, float cy, float angle, float lx, float ly, float *x, float *y) {
-    float c = cosf(angle);
-    float s = sinf(angle);
-    *x = cx + lx * c - ly * s;
-    *y = cy + lx * s + ly * c;
-}
-
-static void draw_tri2_local(float cx, float cy, float angle,
-                            float x0, float y0, float x1, float y1, float x2, float y2,
-                            uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    float ax, ay, bx, by, cx2, cy2;
-    local_to_screen2(cx, cy, angle, x0, y0, &ax, &ay);
-    local_to_screen2(cx, cy, angle, x1, y1, &bx, &by);
-    local_to_screen2(cx, cy, angle, x2, y2, &cx2, &cy2);
-    draw_tri2(ax, ay, bx, by, cx2, cy2, r, gg, b, a);
-}
-
-static void draw_quad2_local(float cx, float cy, float angle,
-                             float x0, float y0, float x1, float y1,
-                             uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    draw_tri2_local(cx, cy, angle, x0, y0, x1, y0, x1, y1, r, gg, b, a);
-    draw_tri2_local(cx, cy, angle, x0, y0, x1, y1, x0, y1, r, gg, b, a);
-}
-
-static void draw_crosshair2(float cx, float cy, float radius, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    draw_ring2(cx, cy, radius, r, gg, b, a);
-    draw_line2(cx - radius * 1.2f, cy, cx - radius * 0.42f, cy, r, gg, b, a);
-    draw_line2(cx + radius * 0.42f, cy, cx + radius * 1.2f, cy, r, gg, b, a);
-    draw_line2(cx, cy - radius * 1.2f, cx, cy - radius * 0.42f, r, gg, b, a);
-    draw_line2(cx, cy + radius * 0.42f, cx, cy + radius * 1.2f, r, gg, b, a);
-}
-
-static void draw_letter_a2(float cx, float cy, float s, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    draw_line2(cx - s * 0.48f, cy + s * 0.50f, cx, cy - s * 0.54f, r, gg, b, a);
-    draw_line2(cx, cy - s * 0.54f, cx + s * 0.48f, cy + s * 0.50f, r, gg, b, a);
-    draw_line2(cx - s * 0.25f, cy + s * 0.06f, cx + s * 0.25f, cy + s * 0.06f, r, gg, b, a);
-}
-
-static void draw_letter_b2(float cx, float cy, float s, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    float x0 = cx - s * 0.36f;
-    float x1 = cx + s * 0.30f;
-    float yt = cy - s * 0.50f;
-    float ym = cy;
-    float yb = cy + s * 0.50f;
-    draw_line2(x0, yt, x0, yb, r, gg, b, a);
-    draw_line2(x0, yt, x1, yt, r, gg, b, a);
-    draw_line2(x0, ym, x1, ym, r, gg, b, a);
-    draw_line2(x0, yb, x1, yb, r, gg, b, a);
-    draw_line2(x1, yt, x1 + s * 0.18f, cy - s * 0.25f, r, gg, b, a);
-    draw_line2(x1 + s * 0.18f, cy - s * 0.25f, x1, ym, r, gg, b, a);
-    draw_line2(x1, ym, x1 + s * 0.18f, cy + s * 0.25f, r, gg, b, a);
-    draw_line2(x1 + s * 0.18f, cy + s * 0.25f, x1, yb, r, gg, b, a);
-}
-
-static void draw_chevron2(float cx, float cy, float s, int dir_x, int dir_y, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
-    if (dir_x < 0) {
-        draw_line2(cx + s * 0.28f, cy - s * 0.38f, cx - s * 0.30f, cy, r, gg, b, a);
-        draw_line2(cx - s * 0.30f, cy, cx + s * 0.28f, cy + s * 0.38f, r, gg, b, a);
-    } else if (dir_x > 0) {
-        draw_line2(cx - s * 0.28f, cy - s * 0.38f, cx + s * 0.30f, cy, r, gg, b, a);
-        draw_line2(cx + s * 0.30f, cy, cx - s * 0.28f, cy + s * 0.38f, r, gg, b, a);
-    } else if (dir_y < 0) {
-        draw_line2(cx - s * 0.38f, cy + s * 0.28f, cx, cy - s * 0.30f, r, gg, b, a);
-        draw_line2(cx, cy - s * 0.30f, cx + s * 0.38f, cy + s * 0.28f, r, gg, b, a);
-    } else if (dir_y > 0) {
-        draw_line2(cx - s * 0.38f, cy - s * 0.28f, cx, cy + s * 0.30f, r, gg, b, a);
-        draw_line2(cx, cy + s * 0.30f, cx + s * 0.38f, cy - s * 0.28f, r, gg, b, a);
-    }
-}
-
-static bool project_world_to_screen2(float x, float z, float *out_x, float *out_y) {
-    float half_x = world_half_x();
-    float view_h = gameplay_view_h();
-    if (half_x <= 0.01f || view_h <= 0.01f) return false;
-    *out_x = (half_x - x) / (half_x * 2.0f) * sapp_widthf();
-    *out_y = ((WORLD_H + 1.25f) - z) / (WORLD_H + 2.5f) * view_h;
-    return true;
-}
-
-static void draw_player_overlay2(void) {
-    Position *p = CECS_GET(&g.world, g.player, Position);
-    Health *hp = CECS_GET(&g.world, g.player, Health);
-    Renderable *rr = CECS_GET(&g.world, g.player, Renderable);
-    if (!p || !hp || hp->hp <= 0) return;
-
-    float sx;
-    float sy;
-    if (!project_world_to_screen2(p->x, p->z, &sx, &sy)) return;
-
-    float view_h = gameplay_view_h();
-    float s = clampf(sapp_widthf() * 0.075f, 28.0f, 46.0f);
-    sx = clampf(sx, s * 0.95f, sapp_widthf() - s * 0.95f);
-    sy = clampf(sy, 86.0f, view_h - s * 1.15f);
-
-    uint8_t pulse = (uint8_t)(190.0f + 45.0f * (0.5f + 0.5f * sinf(g.time * 12.0f)));
-    float heading = rr ? rr->yaw : 0.0f;
-    draw_disc2(sx, sy + s * 0.12f, s * 1.18f, 0, 8, 18, 150);
-    draw_ring2(sx, sy, s * 1.02f, 112, 215, 255, pulse);
-    draw_tri2_local(sx, sy, heading, 0.0f, -s * 1.10f, -s * 0.44f, s * 0.52f, s * 0.44f, s * 0.52f, 235, 242, 250, 245);
-    draw_tri2_local(sx, sy, heading, -s * 0.34f, s * 0.08f, -s * 1.10f, s * 0.74f, -s * 0.18f, s * 0.52f, 160, 178, 198, 238);
-    draw_tri2_local(sx, sy, heading, s * 0.34f, s * 0.08f, s * 1.10f, s * 0.74f, s * 0.18f, s * 0.52f, 160, 178, 198, 238);
-    draw_tri2_local(sx, sy, heading, 0.0f, -s * 0.82f, -s * 0.18f, s * 0.18f, s * 0.18f, s * 0.18f, 255, 168, 54, 250);
-    draw_quad2_local(sx, sy, heading, -s * 0.12f, s * 0.08f, s * 0.12f, s * 0.96f, 48, 62, 78, 245);
-    draw_quad2_local(sx, sy, heading, -s * 0.44f, s * 0.66f, -s * 0.20f, s * 1.10f, 75, 205, 255, 210);
-    draw_quad2_local(sx, sy, heading, s * 0.20f, s * 0.66f, s * 0.44f, s * 1.10f, 75, 205, 255, 210);
-}
-
 static void draw_ui(void) {
     float w = sapp_widthf();
     float h = sapp_heightf();
@@ -1184,59 +976,30 @@ static void draw_ui(void) {
     }
 
     Health *hp = CECS_GET(&g.world, g.player, Health);
-    draw_player_overlay2();
 
-    float hud_w = clampf(w * 0.46f, 230.0f, 380.0f);
-    draw_rect2(10.0f, 10.0f, hud_w, 58.0f, 5, 10, 22, 150);
-    draw_rect2(18.0f, 42.0f, hud_w - 28.0f, 8.0f, 25, 39, 60, 180);
-    float armor_t = hp ? clampf((float)hp->hp / 5.0f, 0.0f, 1.0f) : 0.0f;
-    draw_rect2(18.0f, 42.0f, (hud_w - 28.0f) * armor_t, 8.0f, 92, 230, 150, 220);
-    for (int i = 0; i < 4; i++) {
-        uint8_t a = (i < g.weapon_level) ? 225 : 70;
-        draw_rect2(18.0f + (float)i * 23.0f, 55.0f, 16.0f, 5.0f, 86, 210, 255, a);
+    float hud_y = gameplay_view_h();
+    float hud_h = h - hud_y;
+    if (hud_h < 0.0f) hud_h = 0.0f;
+    draw_rect2(0.0f, hud_y, w, hud_h, 5, 10, 22, 230);
+    draw_rect2(0.0f, hud_y, w, 2.0f, 82, 190, 255, 118);
+    if (g.input.drag_down && g.input.drag_y >= hud_y) {
+        float thumb_r = clampf(hud_h * 0.25f, 28.0f, 44.0f);
+        float tx = clampf(g.input.drag_x, thumb_r, w - thumb_r);
+        float ty = clampf(g.input.drag_y, hud_y + thumb_r, h - thumb_r);
+        draw_disc2(tx, ty, thumb_r * 1.4f, 26, 80, 122, 95);
+        draw_ring2(tx, ty, thumb_r * 1.4f, 104, 210, 255, 160);
     }
 
-    bool show_touch_controls = touch_controls_visible();
-    if (show_touch_controls) {
-        TouchLayout layout = touch_layout();
-        float pad_r = layout.pad_r;
-        float left_x = layout.left_x;
-        float left_y = layout.left_y;
-        float a_x = layout.a_x;
-        float a_y = layout.a_y;
-        float b_x = layout.b_x;
-        float b_y = layout.b_y;
-        float button_r = layout.button_r;
-        draw_disc2(left_x, left_y, pad_r * 1.55f, 2, 7, 17, 220);
-        draw_disc2(a_x, a_y, button_r * 1.55f, 2, 7, 17, 220);
-        draw_disc2(b_x, b_y, button_r * 1.42f, 2, 7, 17, 205);
-        uint8_t base_a = (uint8_t)((g.input.touch_move_down || g.input.touch_fire_down || g.input.touch_b_down) ? 132 : 96);
-        uint8_t dpad_a = g.input.touch_move_down ? 132 : base_a;
-        draw_disc2(left_x, left_y, pad_r * 1.18f, 6, 12, 24, dpad_a);
-        draw_rect2(left_x - pad_r * 0.36f, left_y - pad_r * 1.04f, pad_r * 0.72f, pad_r * 2.08f, 31, 69, 102, 184);
-        draw_rect2(left_x - pad_r * 1.04f, left_y - pad_r * 0.36f, pad_r * 2.08f, pad_r * 0.72f, 31, 69, 102, 184);
-        if (g.input.touch_up) draw_rect2(left_x - pad_r * 0.34f, left_y - pad_r * 1.03f, pad_r * 0.68f, pad_r * 0.68f, 88, 205, 255, 195);
-        if (g.input.touch_down) draw_rect2(left_x - pad_r * 0.34f, left_y + pad_r * 0.35f, pad_r * 0.68f, pad_r * 0.68f, 88, 205, 255, 195);
-        if (g.input.touch_left) draw_rect2(left_x - pad_r * 1.03f, left_y - pad_r * 0.34f, pad_r * 0.68f, pad_r * 0.68f, 88, 205, 255, 195);
-        if (g.input.touch_right) draw_rect2(left_x + pad_r * 0.35f, left_y - pad_r * 0.34f, pad_r * 0.68f, pad_r * 0.68f, 88, 205, 255, 195);
-        draw_disc2(left_x, left_y, pad_r * 0.34f, 11, 20, 36, 190);
-        draw_ring2(left_x, left_y, pad_r * 1.18f, 124, 192, 255, 170);
-        draw_chevron2(left_x - pad_r * 0.68f, left_y, pad_r * 0.32f, -1, 0, 186, 226, 255, 190);
-        draw_chevron2(left_x + pad_r * 0.68f, left_y, pad_r * 0.32f, 1, 0, 186, 226, 255, 190);
-        draw_chevron2(left_x, left_y - pad_r * 0.68f, pad_r * 0.32f, 0, -1, 186, 226, 255, 190);
-        draw_chevron2(left_x, left_y + pad_r * 0.68f, pad_r * 0.32f, 0, 1, 186, 226, 255, 190);
-
-        uint8_t a_fill = g.input.touch_fire_down || g.input.mouse_down ? 190 : 105;
-        uint8_t b_fill = g.input.touch_b_down ? 110 : 54;
-        draw_disc2(b_x, b_y, button_r * 1.08f, 16, 10, 26, base_a);
-        draw_disc2(b_x, b_y, button_r, b_fill, 82, 205, g.input.touch_b_down ? 218 : 178);
-        draw_ring2(b_x, b_y, button_r, 184, 154, 255, 190);
-        draw_letter_b2(b_x, b_y, button_r * 0.88f, 245, 242, 255, 235);
-        draw_disc2(a_x, a_y, button_r * 1.18f, 28, 8, 12, base_a);
-        draw_disc2(a_x, a_y, button_r * 1.06f, a_fill, 52, 44, g.input.touch_fire_down || g.input.mouse_down ? 232 : 188);
-        draw_crosshair2(a_x, a_y, button_r * 0.48f, 255, 190, 130, 95);
-        draw_ring2(a_x, a_y, button_r * 1.06f, 255, 164, 108, 210);
-        draw_letter_a2(a_x, a_y, button_r * 0.92f, 255, 246, 232, 240);
+    float hud_pad = clampf(hud_h * 0.13f, 10.0f, 20.0f);
+    float bar_x = hud_pad;
+    float bar_w = w - hud_pad * 2.0f;
+    float bar_y = hud_y + hud_h - hud_pad - 10.0f;
+    draw_rect2(bar_x, bar_y, bar_w, 8.0f, 25, 39, 60, 190);
+    float armor_t = hp ? clampf((float)hp->hp / 5.0f, 0.0f, 1.0f) : 0.0f;
+    draw_rect2(bar_x, bar_y, bar_w * armor_t, 8.0f, 92, 230, 150, 230);
+    for (int i = 0; i < 4; i++) {
+        uint8_t a = (i < g.weapon_level) ? 225 : 70;
+        draw_rect2(bar_x + (float)i * 24.0f, bar_y - 13.0f, 17.0f, 6.0f, 86, 210, 255, a);
     }
 
     float text_scale = clampf(sapp_dpi_scale(), 1.0f, 2.0f);
@@ -1244,7 +1007,7 @@ static void draw_ui(void) {
     float th = h / text_scale;
     sdtx_canvas(tw, th);
     sdtx_font(0);
-    sdtx_origin(12.0f, 12.0f);
+    sdtx_origin(hud_pad / text_scale, (hud_y + hud_pad) / text_scale);
     sdtx_color3b(210, 232, 255);
     sdtx_pos(0.0f, 0.0f);
     sdtx_printf("SCORE %06d", g.score);
@@ -1258,7 +1021,7 @@ static void draw_ui(void) {
         sdtx_puts("TRAD STRIKE");
         sdtx_pos(0.0f, 1.5f);
         sdtx_color3b(165, 210, 255);
-        sdtx_puts("PRESS A");
+        sdtx_puts("TAP TO START");
     }
 }
 
@@ -1327,13 +1090,11 @@ static void frame(void) {
         if (g.invuln_timer > 0.0f) g.invuln_timer -= g.dt;
         if (g.shake > 0.0f) g.shake = clampf(g.shake - g.dt * 1.9f, 0.0f, 1.0f);
         if (g.flash > 0.0f) g.flash = clampf(g.flash - g.dt * 1.7f, 0.0f, 1.0f);
-        if (g.input.touch_overlay_timer > 0.0f) g.input.touch_overlay_timer -= g.dt;
         (void)cecs_schedule_run(&g.schedule, &g.world);
     } else {
         g.scroll += g.dt * 1.6f;
         if (g.shake > 0.0f) g.shake = clampf(g.shake - g.dt * 1.6f, 0.0f, 1.0f);
         if (g.flash > 0.0f) g.flash = clampf(g.flash - g.dt * 1.4f, 0.0f, 1.0f);
-        if (g.input.touch_overlay_timer > 0.0f) g.input.touch_overlay_timer -= g.dt;
     }
 
     sg_pass_action action = {
@@ -1361,137 +1122,79 @@ static void cleanup(void) {
     sg_shutdown();
 }
 
-static void release_touch_move(void) {
-    g.input.touch_move_down = false;
-    clear_touch_dpad();
+static void begin_drag(bool is_touch, uintptr_t touch_id, float x, float y) {
+    g.input.drag_down = true;
+    g.input.drag_is_touch = is_touch;
+    g.input.drag_touch_id = touch_id;
+    g.input.drag_x = x;
+    g.input.drag_y = y;
+    g.input.fire_pressed = true;
 }
 
-static void assign_touch_control(const sapp_touchpoint *t) {
-    TouchLayout layout = touch_layout();
-    float w = sapp_widthf();
-    float h = sapp_heightf();
-    bool dpad_hit = point_in_circle2(t->pos_x, t->pos_y, layout.left_x, layout.left_y, layout.pad_r * 1.48f) ||
-                    (t->pos_x < w * 0.48f && t->pos_y > h * 0.46f);
-    bool a_hit = point_in_circle2(t->pos_x, t->pos_y, layout.a_x, layout.a_y, layout.button_r * 1.55f);
-    bool b_hit = point_in_circle2(t->pos_x, t->pos_y, layout.b_x, layout.b_y, layout.button_r * 1.55f);
+static void update_drag(float x, float y) {
+    g.input.drag_x = x;
+    g.input.drag_y = y;
+}
 
-    if (g.input.touch_move_down && g.input.touch_move_id == t->identifier) {
-        g.input.touch_move_x = t->pos_x;
-        g.input.touch_move_y = t->pos_y;
-        set_touch_dpad(t->pos_x, t->pos_y);
-        return;
-    }
-    if (g.input.touch_fire_down && g.input.touch_fire_id == t->identifier) {
-        g.input.touch_fire_x = t->pos_x;
-        g.input.touch_fire_y = t->pos_y;
-        return;
-    }
-    if (g.input.touch_b_down && g.input.touch_b_id == t->identifier) {
-        return;
-    }
+static void end_drag(void) {
+    g.input.drag_down = false;
+    g.input.drag_is_touch = false;
+    g.input.drag_touch_id = 0;
+}
 
-    if (dpad_hit && !g.input.touch_move_down) {
-        g.input.touch_move_down = true;
-        g.input.touch_move_id = t->identifier;
-        g.input.touch_move_origin_x = layout.left_x;
-        g.input.touch_move_origin_y = layout.left_y;
-        g.input.touch_move_x = t->pos_x;
-        g.input.touch_move_y = t->pos_y;
-        set_touch_dpad(t->pos_x, t->pos_y);
-    } else if ((a_hit || (!b_hit && t->pos_x >= w * 0.5f && t->pos_y > h * 0.48f)) && !g.input.touch_fire_down) {
-        g.input.touch_fire_down = true;
-        g.input.touch_fire_id = t->identifier;
-        g.input.touch_fire_origin_x = layout.a_x;
-        g.input.touch_fire_origin_y = layout.a_y;
-        g.input.touch_fire_x = t->pos_x;
-        g.input.touch_fire_y = t->pos_y;
-        g.input.fire_pressed = true;
-    } else if (b_hit && !g.input.touch_b_down) {
-        g.input.touch_b_down = true;
-        g.input.touch_b_id = t->identifier;
-        g.input.fire_pressed = true;
+static int find_touch_index(const sapp_event *ev, uintptr_t id) {
+    for (int i = 0; i < ev->num_touches; i++) {
+        if (ev->touches[i].identifier == id) return i;
     }
+    return -1;
 }
 
 static void touch_begin_or_move(const sapp_event *ev) {
-    g.input.touch_overlay_timer = 3.0f;
-    for (int i = 0; i < ev->num_touches; i++) {
-        assign_touch_control(&ev->touches[i]);
+    if (g.input.drag_down && g.input.drag_is_touch) {
+        int index = find_touch_index(ev, g.input.drag_touch_id);
+        if (index >= 0) {
+            update_drag(ev->touches[index].pos_x, ev->touches[index].pos_y);
+        }
+        return;
     }
-}
-
-static bool touch_id_in_event(const sapp_event *ev, uintptr_t id) {
-    for (int i = 0; i < ev->num_touches; i++) {
-        if (ev->touches[i].identifier == id) return true;
+    if (!g.input.drag_down && ev->num_touches > 0) {
+        const sapp_touchpoint *t = &ev->touches[0];
+        begin_drag(true, t->identifier, t->pos_x, t->pos_y);
     }
-    return false;
 }
 
 static void touch_end_or_cancel(const sapp_event *ev) {
-    for (int i = 0; i < ev->num_touches; i++) {
-        const sapp_touchpoint *t = &ev->touches[i];
-        if (g.input.touch_move_down && g.input.touch_move_id == t->identifier) {
-            release_touch_move();
+    if (g.input.drag_down && g.input.drag_is_touch) {
+        int index = find_touch_index(ev, g.input.drag_touch_id);
+        if (index >= 0) {
+            update_drag(ev->touches[index].pos_x, ev->touches[index].pos_y);
+        } else {
+            end_drag();
         }
-        if (g.input.touch_fire_down && g.input.touch_fire_id == t->identifier) {
-            g.input.touch_fire_down = false;
-        }
-        if (g.input.touch_b_down && g.input.touch_b_id == t->identifier) {
-            g.input.touch_b_down = false;
-        }
-    }
-    g.input.touch_overlay_timer = 2.0f;
-    if (g.input.touch_move_down && !touch_id_in_event(ev, g.input.touch_move_id)) {
-        release_touch_move();
-    }
-    if (g.input.touch_fire_down && !touch_id_in_event(ev, g.input.touch_fire_id)) {
-        g.input.touch_fire_down = false;
-    }
-    if (g.input.touch_b_down && !touch_id_in_event(ev, g.input.touch_b_id)) {
-        g.input.touch_b_down = false;
-    }
-    if (ev->num_touches == 0) {
-        release_touch_move();
-        g.input.touch_fire_down = false;
-        g.input.touch_b_down = false;
     }
 }
 
 static void event(const sapp_event *ev) {
     switch (ev->type) {
     case SAPP_EVENTTYPE_KEY_DOWN:
-        if (ev->key_code >= 0 && ev->key_code < (sapp_keycode)CECS_ARRAY_COUNT(g.input.keys)) {
-            g.input.keys[ev->key_code] = true;
-        }
-        if (!ev->key_repeat && (ev->key_code == SAPP_KEYCODE_SPACE || ev->key_code == SAPP_KEYCODE_Z ||
-                                ev->key_code == SAPP_KEYCODE_X || ev->key_code == SAPP_KEYCODE_ENTER)) {
-            g.input.fire_pressed = true;
-        }
         if (!ev->key_repeat && ev->key_code == SAPP_KEYCODE_R) {
             reset_game();
         }
         break;
-    case SAPP_EVENTTYPE_KEY_UP:
-        if (ev->key_code >= 0 && ev->key_code < (sapp_keycode)CECS_ARRAY_COUNT(g.input.keys)) {
-            g.input.keys[ev->key_code] = false;
-        }
-        break;
     case SAPP_EVENTTYPE_MOUSE_DOWN:
-        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
-            g.input.mouse_down = true;
-            g.input.mouse_x = ev->mouse_x;
-            g.input.mouse_y = ev->mouse_y;
-            g.input.fire_pressed = true;
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && !g.input.drag_down) {
+            begin_drag(false, 0, ev->mouse_x, ev->mouse_y);
         }
         break;
     case SAPP_EVENTTYPE_MOUSE_UP:
-        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
-            g.input.mouse_down = false;
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && g.input.drag_down && !g.input.drag_is_touch) {
+            end_drag();
         }
         break;
     case SAPP_EVENTTYPE_MOUSE_MOVE:
-        g.input.mouse_x = ev->mouse_x;
-        g.input.mouse_y = ev->mouse_y;
+        if (g.input.drag_down && !g.input.drag_is_touch) {
+            update_drag(ev->mouse_x, ev->mouse_y);
+        }
         break;
     case SAPP_EVENTTYPE_TOUCHES_BEGAN:
     case SAPP_EVENTTYPE_TOUCHES_MOVED:

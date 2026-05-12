@@ -62,7 +62,7 @@ $(WEB_DIR)/index.html: $(SRC) $(GEN_H) web/shell.html
 	$(EMCC) $(COMMON_CFLAGS) $(WEB_CFLAGS) $(SRC) -o $@ \
 		--shell-file web/shell.html \
 		-sUSE_WEBGL2=1 -sFULL_ES3=1 -sWASM=1 -sALLOW_MEMORY_GROWTH=1 -sNO_FILESYSTEM=1
-	$(PYTHON) -c "from pathlib import Path; p=Path('$@'); s=p.read_text(); s=s.replace('src=\"index.js\"', 'src=\"index.js?v=controls11\"'); p.write_text(s)"
+	$(PYTHON) -c "from pathlib import Path; p=Path('$@'); s=p.read_text(); s=s.replace('src=\"index.js\"', 'src=\"index.js?v=drag5\"'); p.write_text(s)"
 
 run: native
 	$(BUILD_DIR)/$(PROJECT)
