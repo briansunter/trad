@@ -1,10 +1,14 @@
 # TRAD Strike
 
+![TRAD Strike screenshot](docs/media/screenshot.png)
+
 A small Raiden Trad-inspired vertical shooter written in C99 with:
 
 - Sokol for native and browser rendering/input.
 - `../c-ecs` for gameplay entities and systems.
 - Kenney Space Kit 3D models converted to static C mesh data at build time.
+
+Play in your browser: <https://briansunter.github.io/trad/>
 
 ## Build
 
